@@ -36,5 +36,6 @@
   "backend": true,
   "queryOptions": {
     "minInterval": true
-  }
+  },
+  "streaming": true
 }

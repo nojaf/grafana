@@ -337,6 +337,7 @@ export function ExploreToolbar({ exploreId, onChangeTime, onContentOutlineToogle
                     reportInteraction('grafana_explore_logs_live_tailing_clicked', {
                       datasourceType: datasourceInstance?.type,
                     });
+                    console.log('[ExploreToolbar] LiveTailButton start action triggered');
                     c.start();
                   },
                 };

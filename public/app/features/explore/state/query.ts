@@ -631,6 +631,12 @@ export const runQueries = createAsyncThunk<void, RunQueriesOptions>(
 
       dispatch(changeLoadingStateAction({ exploreId, loadingState: LoadingState.Loading }));
 
+      console.log('[Explore runQueries] Preparing request', {
+        exploreId: exploreId,
+        isLive: live,
+        transactionRequest: transaction.request,
+      });
+
       newQuerySource = combineLatest([
         runRequest(datasourceInstance, transaction.request)
           // Simple throttle for live tailing, in case of > 1000 rows per interval we spend about 200ms on processing and

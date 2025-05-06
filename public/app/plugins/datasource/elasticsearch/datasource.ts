@@ -1,5 +1,5 @@
 import { cloneDeep, first as _first, isNumber, isString, map as _map, isObject } from 'lodash';
-import { from, generate, lastValueFrom, Observable, of } from 'rxjs';
+import { generate, lastValueFrom, Observable, of, from } from 'rxjs';
 import { catchError, first, map, mergeMap, skipWhile, throwIfEmpty, tap } from 'rxjs/operators';
 import { SemVer } from 'semver';
 
@@ -39,6 +39,7 @@ import {
   DataSourceWithQueryModificationSupport,
   AdHocVariableModel,
   TypedVariableModel,
+  LoadingState,
 } from '@grafana/data';
 import {
   DataSourceWithBackend,
@@ -47,6 +48,7 @@ import {
   TemplateSrv,
   getTemplateSrv,
   config,
+  toDataQueryError,
 } from '@grafana/runtime';
 
 import { IndexPattern, intervalMap } from './IndexPattern';
@@ -102,6 +104,12 @@ const ELASTIC_META_FIELDS = [
   '_meta',
 ];
 
+// Helper function to check if a query is suitable for live streaming
+function isLiveStreamableQuery(query: ElasticsearchQuery): boolean {
+  // For now, only allow basic log queries
+  return query.metrics?.length === 1 && query.metrics[0].type === 'logs';
+}
+
 export class ElasticDatasource
   extends DataSourceWithBackend<ElasticsearchQuery, ElasticsearchOptions>
   implements
@@ -128,6 +136,7 @@ export class ElasticDatasource
   includeFrozen: boolean;
   isProxyAccess: boolean;
   databaseVersion: SemVer | null;
+  private isHandlingLiveStreaming = false;
 
   constructor(
     instanceSettings: DataSourceInstanceSettings<ElasticsearchOptions>,
@@ -681,7 +690,23 @@ export class ElasticDatasource
    * @returns An Observable of DataQueryResponse containing the query results.
    */
   query(request: DataQueryRequest<ElasticsearchQuery>): Observable<DataQueryResponse> {
+    console.log('[ElasticDatasource query] Received request:', request);
+
     const start = new Date();
+
+    // Handle live streaming - use local state to avoid recursion
+    if (request.liveStreaming && !this.isHandlingLiveStreaming) {
+      console.log('[ElasticDatasource query] Running live query through backend');
+      try {
+        // Set the flag to prevent recursion
+        this.isHandlingLiveStreaming = true;
+        return this.runLiveQueryThroughBackend(request);
+      } finally {
+        // Always reset the flag even if there's an error
+        this.isHandlingLiveStreaming = false;
+      }
+    }
+
     return super.query(request).pipe(
       tap((response) => trackQuery(response, request, start)),
       map((response) => {
@@ -1159,7 +1184,7 @@ export class ElasticDatasource
     // we want this function to never fail
     const getDbVersionObservable = from(this.getResourceRequest(''));
     return lastValueFrom(getDbVersionObservable).then(
-      (data) => {
+      (data: any) => {
         const versionNumber = data?.version?.number;
         if (typeof versionNumber !== 'string') {
           return null;
@@ -1240,6 +1265,38 @@ export class ElasticDatasource
     };
     return contextRequest;
   };
+
+  /**
+   * Used within the `query` to execute live queries through the Go backend stream.
+   * It is intended for logs-queries, not metric queries.
+   * @returns An Observable of DataQueryResponse with live query results or an empty response if no suitable queries are found.
+   */
+  private runLiveQueryThroughBackend(request: DataQueryRequest<ElasticsearchQuery>): Observable<DataQueryResponse> {
+    const logger = console;
+    logger.log('[ElasticDatasource runLiveQueryThroughBackend] Request:', request);
+
+    // Filter for suitable live queries
+    const liveQueries = request.targets.filter(isLiveStreamableQuery);
+
+    if (liveQueries.length === 0) {
+      logger.log('[ElasticDatasource runLiveQueryThroughBackend] No live streamable queries found.');
+      return of({ data: [], state: LoadingState.Done });
+    }
+
+    const queryToSend = liveQueries[0];
+    logger.log('[ElasticDatasource runLiveQueryThroughBackend] Using query:', queryToSend);
+
+    try {
+      // Call the parent class's query method directly to avoid the recursion
+      return super.query({
+        ...request,
+        targets: [queryToSend],
+      });
+    } catch (err) {
+      logger.error('[ElasticDatasource] Setup error:', err);
+      return of({ data: [], state: LoadingState.Error, error: toDataQueryError(err) });
+    }
+  }
 }
 
 // Function to enhance the data frame with data links configured in the data source settings.
